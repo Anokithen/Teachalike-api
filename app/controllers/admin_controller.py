@@ -1,0 +1,175 @@
+"""Admin-only account management: registering parents/teachers, viewing every
+parent + child in the system, and banning/deleting accounts.
+
+Leaderboard and content (books / mini-games) viewing needs no admin-specific
+endpoint: an admin is just an authenticated account, so the existing
+GET /api/leaderboard, GET /api/books and GET /api/mini-games/<id> endpoints
+already work for admin tokens. Likewise GET /api/children already returns
+*every* child when called by an admin (see child_controller.list_children).
+"""
+from flask import jsonify, request
+from flask_jwt_extended import current_user
+from email_validator import validate_email, EmailNotValidError
+
+from app.extensions import db
+from app.models.parent_model import Parent, ROLE_PARENT, ROLE_TEACHER, ROLE_ADMIN, VALID_ROLES
+from app.models.child_model import Child
+
+
+def _validate_new_account_payload(data):
+    errors = []
+    if not data:
+        return ["Request body is required."]
+
+    name = data.get("name")
+    if name is None or str(name).strip() == "":
+        errors.append("name is required.")
+
+    email = data.get("email")
+    if email is None or str(email).strip() == "":
+        errors.append("email is required.")
+    else:
+        try:
+            emailinfo = validate_email(str(email).strip(), check_deliverability=False)
+            data["email"] = emailinfo.normalized
+        except EmailNotValidError as e:
+            errors.append(str(e))
+
+    password = data.get("password")
+    if password is None or str(password).strip() == "":
+        errors.append("password is required.")
+    elif len(str(password)) < 6:
+        errors.append("password must be at least 6 characters.")
+
+    return errors
+
+
+def _create_account(role):
+    data = request.get_json(silent=True)
+    errors = _validate_new_account_payload(data)
+    if errors:
+        return jsonify({"errors": errors}), 400
+
+    email = str(data.get("email")).strip()
+    if Parent.query.filter_by(email=email).first():
+        return jsonify({"error": "An account with this email already exists."}), 409
+
+    try:
+        account = Parent(name=str(data.get("name")).strip(), email=email, role=role)
+        account.set_password(str(data.get("password")))
+        db.session.add(account)
+        db.session.commit()
+        return jsonify(
+            {"message": f"{role.capitalize()} account created successfully.", "account": account.to_dict()}
+        ), 201
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "An internal server error occurred."}), 500
+
+
+def register_parent():
+    """POST /api/admin/parents — admin creates a parent account directly."""
+    return _create_account(ROLE_PARENT)
+
+
+def register_teacher():
+    """POST /api/admin/teachers — admin creates a teacher account."""
+    return _create_account(ROLE_TEACHER)
+
+
+def register_admin():
+    """POST /api/admin/admins — an existing admin creates another admin account."""
+    return _create_account(ROLE_ADMIN)
+
+
+def _list_accounts_by_role(role):
+    accounts = Parent.query.filter_by(role=role).order_by(Parent.id.desc()).all()
+    results = []
+    for account in accounts:
+        item = account.to_dict()
+        if role == ROLE_PARENT:
+            item["children_count"] = Child.query.filter_by(parent_id=account.id).count()
+        results.append(item)
+    return results
+
+
+def list_parents():
+    """GET /api/admin/parents"""
+    return jsonify({"parents": _list_accounts_by_role(ROLE_PARENT)}), 200
+
+
+def list_teachers():
+    """GET /api/admin/teachers"""
+    return jsonify({"teachers": _list_accounts_by_role(ROLE_TEACHER)}), 200
+
+
+def get_parent(parent_id):
+    """GET /api/admin/parents/<id> — full detail including their children."""
+    parent = db.session.get(Parent, parent_id)
+    if not parent or parent.role != ROLE_PARENT:
+        return jsonify({"error": "Parent not found."}), 404
+
+    children = Child.query.filter_by(parent_id=parent.id).order_by(Child.id.desc()).all()
+    data = parent.to_dict()
+    data["children"] = [c.to_dict() for c in children]
+    return jsonify({"parent": data}), 200
+
+
+def _get_target_account(account_id):
+    account = db.session.get(Parent, account_id)
+    if not account:
+        return None, (jsonify({"error": "Account not found."}), 404)
+    if account.id == current_user.id:
+        return None, (jsonify({"error": "You cannot perform this action on your own account."}), 400)
+    if account.is_admin:
+        return None, (jsonify({"error": "Admin accounts cannot be managed through this endpoint."}), 403)
+    return account, None
+
+
+def ban_account(account_id):
+    """PATCH /api/admin/parents/<id>/ban or /api/admin/teachers/<id>/ban"""
+    account, error_response = _get_target_account(account_id)
+    if error_response:
+        return error_response
+
+    try:
+        account.is_banned = True
+        db.session.commit()
+        return jsonify({"message": "Account banned successfully.", "account": account.to_dict()}), 200
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "An internal server error occurred."}), 500
+
+
+def unban_account(account_id):
+    """PATCH /api/admin/parents/<id>/unban or /api/admin/teachers/<id>/unban"""
+    account, error_response = _get_target_account(account_id)
+    if error_response:
+        return error_response
+
+    try:
+        account.is_banned = False
+        db.session.commit()
+        return jsonify({"message": "Account unbanned successfully.", "account": account.to_dict()}), 200
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "An internal server error occurred."}), 500
+
+
+def delete_account(account_id):
+    """DELETE /api/admin/parents/<id> or /api/admin/teachers/<id>
+
+    Deleting a parent cascades to their children and voice profiles, same as
+    a parent deleting their own account.
+    """
+    account, error_response = _get_target_account(account_id)
+    if error_response:
+        return error_response
+
+    try:
+        db.session.delete(account)
+        db.session.commit()
+        return jsonify({"message": "Account deleted successfully."}), 200
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "An internal server error occurred."}), 500
