@@ -1,12 +1,3 @@
-"""Admin-only account management: registering parents/teachers, viewing every
-parent + child in the system, and banning/deleting accounts.
-
-Leaderboard and content (books / mini-games) viewing needs no admin-specific
-endpoint: an admin is just an authenticated account, so the existing
-GET /api/leaderboard, GET /api/books and GET /api/mini-games/<id> endpoints
-already work for admin tokens. Likewise GET /api/children already returns
-*every* child when called by an admin (see child_controller.list_children).
-"""
 from flask import jsonify, request
 from flask_jwt_extended import current_user
 from email_validator import validate_email, EmailNotValidError

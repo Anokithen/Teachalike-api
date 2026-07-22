@@ -10,13 +10,7 @@ VALID_ROLES = (ROLE_PARENT, ROLE_TEACHER, ROLE_ADMIN)
 
 
 class Parent(db.Model):
-    """Account table for every logged-in user: parents, teachers and admins.
-
-    Kept as `Parent`/`parents` (rather than renaming to a generic `User`) to
-    avoid a disruptive rename across every foreign key / import in the
-    codebase. Conceptually this is now the app's account table, distinguished
-    by `role`.
-    """
+    
 
     __tablename__ = "parents"
 
